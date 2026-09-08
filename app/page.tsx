@@ -6,7 +6,7 @@ import {
   CircleHelp, Clock3, Copy, CreditCard, Home, MapPin, MessageCircle,
   Phone, Scissors, ShieldCheck, Sparkles, TicketCheck, Upload, UserRound,
 } from 'lucide-react';
-import { ChangeEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, useEffect, useState } from 'react';
 
 declare global {
   interface Document {
@@ -17,6 +17,10 @@ declare global {
 }
 
 type Screen = 'home' | 'services' | 'barber' | 'schedule' | 'checkout' | 'payment' | 'success' | 'appointments' | 'profile';
+type PublicConfig = { liffId: string; bankName: string; accountName: string; accountNumber: string; paymentQrUrl: string; configured: boolean };
+type LiffClient = { init(config: { liffId: string; withLoginOnExternalBrowser?: boolean }): Promise<void>; isLoggedIn(): boolean; login(): void; getIDToken(): string | null; getProfile(): Promise<{ displayName: string; pictureUrl?: string }> };
+
+declare global { interface Window { liff?: LiffClient } }
 
 const services = [
   { id: 'cut', name: 'ตัดผมชาย', detail: 'สระ · ตัด · เซ็ตทรง', duration: 60, price: 350, tag: 'ยอดนิยม' },
@@ -46,7 +50,15 @@ export default function HomePage() {
   const [dateIndex, setDateIndex] = useState(0);
   const [time, setTime] = useState('13:30');
   const [slip, setSlip] = useState('');
+  const [slipFile, setSlipFile] = useState<File | null>(null);
   const [checking, setChecking] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [bookingId, setBookingId] = useState('');
+  const [lineIdToken, setLineIdToken] = useState('');
+  const [customerName, setCustomerName] = useState('ลูกค้า');
+  const [phone, setPhone] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [config, setConfig] = useState<PublicConfig>({ liffId:'', bankName:'ธนาคารของร้าน', accountName:'ชื่อบัญชีร้าน', accountNumber:'กรุณาตั้งค่าเลขบัญชี', paymentQrUrl:'', configured:false });
 
   const service = services.find((item) => item.id === serviceId) ?? services[0];
   const barber = barbers.find((item) => item.id === barberId) ?? barbers[0];
@@ -61,12 +73,26 @@ export default function HomePage() {
     services: 'home', barber: 'services', schedule: 'barber', checkout: 'schedule', payment: 'checkout', success: 'home',
   };
 
-  const onSlip = (event: ChangeEvent<HTMLInputElement>) => setSlip(event.target.files?.[0]?.name ?? '');
-  const verifySlip = () => {
-    if (!slip) return;
+  const onSlip = (event: ChangeEvent<HTMLInputElement>) => { const file=event.target.files?.[0]??null; setSlipFile(file); setSlip(file?.name ?? ''); setErrorMessage(''); };
+  const verifySlip = async () => {
+    if (!slipFile) return;
     setChecking(true);
-    window.setTimeout(() => { setChecking(false); setScreen('success'); }, 1400);
+    setErrorMessage('');
+    if (!config.configured || !lineIdToken || bookingId.startsWith('DEMO')) { window.setTimeout(() => { setChecking(false); setScreen('success'); }, 1200); return; }
+    try { const body=new FormData(); body.set('bookingId',bookingId); body.set('slip',slipFile); const response=await fetch('/api/payments/verify',{method:'POST',headers:{authorization:`Bearer ${lineIdToken}`},body}); const result=await response.json() as {error?:string}; if(!response.ok) throw new Error(result.error||'ตรวจสอบสลิปไม่สำเร็จ'); setScreen('success'); } catch(error) { setErrorMessage(error instanceof Error?error.message:'ตรวจสอบสลิปไม่สำเร็จ'); } finally { setChecking(false); }
   };
+
+  const createBooking = async () => {
+    setSubmitting(true); setErrorMessage('');
+    if (!config.configured || !lineIdToken) { setBookingId(`DEMO-${Date.now()}`); setScreen('payment'); setSubmitting(false); return; }
+    try { const date=new Date(); date.setDate(date.getDate()+dateIndex); const localDate=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`; const response=await fetch('/api/bookings',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${lineIdToken}`},body:JSON.stringify({serviceId,barberId,date:localDate,time,customerName,phone})}); const result=await response.json() as {id?:string;error?:string}; if(!response.ok||!result.id) throw new Error(result.error||'สร้างการจองไม่สำเร็จ'); setBookingId(result.id); setScreen('payment'); } catch(error) { setErrorMessage(error instanceof Error?error.message:'สร้างการจองไม่สำเร็จ'); } finally { setSubmitting(false); }
+  };
+
+  useEffect(() => {
+    let active=true;
+    void (async()=>{ try { const response=await fetch('/api/config'); const value=await response.json() as PublicConfig; if(!active)return; setConfig(value); const view=new URLSearchParams(location.search).get('view') as Screen|null; if(view&&['appointments','services','barber'].includes(view)) setScreen(view); if(!value.liffId)return; const start=async()=>{ await window.liff?.init({liffId:value.liffId,withLoginOnExternalBrowser:true}); if(!window.liff?.isLoggedIn()){window.liff?.login();return;} setLineIdToken(window.liff.getIDToken()??''); const profile=await window.liff.getProfile(); setCustomerName(profile.displayName); }; const script=document.createElement('script'); script.src='https://static.line-scdn.net/liff/edge/2/sdk.js'; script.async=true; script.onload=()=>void start(); document.head.appendChild(script); } catch { /* Keep the clearly marked demo mode available. */ } })();
+    return()=>{active=false;};
+  },[]);
 
   useEffect(() => {
     const context = document.modelContext;
@@ -100,30 +126,30 @@ export default function HomePage() {
     return () => lifecycle.abort();
   }, []);
 
-  const content = useMemo(() => {
-    if (screen === 'home') return <HomeView onBook={startBooking} onAppointments={() => navTo('appointments')} />;
+  const content = (() => {
+    if (screen === 'home') return <HomeView onBook={startBooking} onAppointments={() => navTo('appointments')} live={config.configured} />;
     if (screen === 'services') return <ServicesView selected={serviceId} onSelect={chooseService} />;
     if (screen === 'barber') return <BarberView selected={barberId} onSelect={chooseBarber} />;
     if (screen === 'schedule') return <ScheduleView barber={barber} dateIndex={dateIndex} time={time} onDate={setDateIndex} onTime={setTime} onNext={() => setScreen('checkout')} />;
-    if (screen === 'checkout') return <CheckoutView service={service} barber={barber} date={dates[dateIndex].full} time={time} deposit={deposit} onNext={() => setScreen('payment')} />;
-    if (screen === 'payment') return <PaymentView amount={deposit} slip={slip} checking={checking} onSlip={onSlip} onVerify={verifySlip} />;
+    if (screen === 'checkout') return <CheckoutView service={service} barber={barber} date={dates[dateIndex].full} time={time} deposit={deposit} customerName={customerName} phone={phone} submitting={submitting} error={errorMessage} onName={setCustomerName} onPhone={setPhone} onNext={createBooking} />;
+    if (screen === 'payment') return <PaymentView amount={deposit} slip={slip} checking={checking} config={config} error={errorMessage} onSlip={onSlip} onVerify={verifySlip} />;
     if (screen === 'success') return <SuccessView service={service} barber={barber} date={dates[dateIndex].full} time={time} onAppointments={() => setScreen('appointments')} />;
-    if (screen === 'appointments') return <AppointmentsView onBook={startBooking} />;
+    if (screen === 'appointments') return <AppointmentsView onBook={startBooking} token={lineIdToken} live={config.configured} />;
     return <ProfileView />;
-  }, [screen, serviceId, barberId, dateIndex, time, slip, checking, service, barber, deposit]);
+  })();
 
   const hideNav = ['services', 'barber', 'schedule', 'checkout', 'payment', 'success'].includes(screen);
   return (
     <main className="app-shell">
-      {backMap[screen] ? <PageTop title={pageTitle(screen)} onBack={() => setScreen(backMap[screen]!)} /> : screen !== 'success' && <BrandTop />}
+      {backMap[screen] ? <PageTop title={pageTitle(screen)} onBack={() => setScreen(backMap[screen]!)} /> : screen !== 'success' && <BrandTop name={customerName} />}
       {content}
       {!hideNav && <BottomNav screen={screen} onNav={navTo} />}
     </main>
   );
 }
 
-function BrandTop() {
-  return <header className="topbar"><div className="brand-mark"><Scissors size={18}/></div><div><p className="eyebrow">TRIMLY BARBERSHOP</p><h1>สวัสดีครับ คุณเจ</h1></div><button className="profile" aria-label="โปรไฟล์">J</button></header>;
+function BrandTop({name}:{name:string}) {
+  return <header className="topbar"><div className="brand-mark"><Scissors size={18}/></div><div><p className="eyebrow">TRIMLY BARBERSHOP</p><h1>สวัสดีครับ {name}</h1></div><button className="profile" aria-label="โปรไฟล์">{name.slice(0,1)}</button></header>;
 }
 
 function PageTop({ title, onBack }: { title: string; onBack: () => void }) {
@@ -134,8 +160,9 @@ function Step({ current }: { current: number }) {
   return <div className="steps" aria-label={`ขั้นตอนที่ ${current} จาก 4`}>{[1,2,3,4].map((n) => <span key={n} className={n <= current ? 'done' : ''} />)}</div>;
 }
 
-function HomeView({ onBook, onAppointments }: { onBook: () => void; onAppointments: () => void }) {
+function HomeView({ onBook, onAppointments, live }: { onBook: () => void; onAppointments: () => void; live:boolean }) {
   return <>
+    {!live&&<div className="demo-banner"><CircleHelp/>โหมดทดลอง — ใส่ค่า LINE, บัญชี และ SlipOK ก่อนเปิดรับคิวจริง</div>}
     <section className="hero-card">
       <Image src="/barbershop-hero.png" alt="บรรยากาศร้านตัดผม TRIMLY" fill priority sizes="(max-width: 640px) 100vw, 520px" />
       <div className="hero-shade"/><div className="hero-copy"><span><span className="open-dot"/>เปิดวันนี้ถึง 20:00</span><h2>ทรงใหม่<br/>เริ่มตรงนี้</h2><button onClick={onBook}>จองคิวตอนนี้ <ChevronRight size={18}/></button></div>
@@ -169,22 +196,25 @@ function ScheduleView({ barber, dateIndex, time, onDate, onTime, onNext }: { bar
   </section>;
 }
 
-function CheckoutView({ service, barber, date, time, deposit, onNext }: { service: typeof services[number]; barber: typeof barbers[number]; date:string; time:string; deposit:number; onNext:()=>void }) {
+function CheckoutView({ service, barber, date, time, deposit, customerName, phone, submitting, error, onName, onPhone, onNext }: { service: typeof services[number]; barber: typeof barbers[number]; date:string; time:string; deposit:number; customerName:string; phone:string; submitting:boolean; error:string; onName:(v:string)=>void; onPhone:(v:string)=>void; onNext:()=>void }) {
   return <section className="flow with-action"><Step current={4}/><div className="flow-intro"><p className="eyebrow">CHECKOUT</p><h2>ตรวจสอบการจอง</h2><p>กรอกข้อมูลติดต่อและเช็กรายละเอียดก่อนชำระเงิน</p></div>
     <div className="summary-card"><div className="summary-date"><CalendarDays/><div><small>วันและเวลา</small><strong>{date} · {time} น.</strong></div></div><hr/><dl><div><dt>บริการ</dt><dd>{service.name}</dd></div><div><dt>ช่าง</dt><dd>{barber.name}</dd></div><div><dt>ระยะเวลา</dt><dd>{service.duration} นาที</dd></div><div><dt>ราคาบริการ</dt><dd>฿{service.price.toLocaleString()}</dd></div></dl></div>
-    <div className="form-card"><label>ชื่อผู้จอง<input defaultValue="เจ เจริญทรง"/></label><label>เบอร์โทรศัพท์<input inputMode="tel" defaultValue="081 234 5678"/></label><p><ShieldCheck/> ข้อมูลนี้ใช้สำหรับยืนยันและแจ้งเตือนคิวเท่านั้น</p></div>
+    <div className="form-card"><label>ชื่อผู้จอง<input value={customerName} onChange={(e)=>onName(e.target.value)}/></label><label>เบอร์โทรศัพท์<input inputMode="tel" value={phone} onChange={(e)=>onPhone(e.target.value)} placeholder="08X XXX XXXX"/></label><p><ShieldCheck/> ข้อมูลนี้ใช้สำหรับยืนยันและแจ้งเตือนคิวเท่านั้น</p></div>
+    {error&&<p className="error-message">{error}</p>}
     <div className="policy-note"><CircleHelp/><p><strong>เงื่อนไขการจอง</strong><br/>ชำระมัดจำภายใน 15 นาที เลื่อนคิวได้ 1 ครั้งก่อนเวลานัดอย่างน้อย 3 ชั่วโมง</p></div>
-    <div className="sticky-action"><div><small>ยอดมัดจำ</small><strong className="money">฿{deposit.toLocaleString()}</strong></div><button onClick={onNext}>ไปชำระเงิน <ChevronRight/></button></div>
+    <div className="sticky-action"><div><small>ยอดมัดจำ</small><strong className="money">฿{deposit.toLocaleString()}</strong></div><button disabled={!phone||submitting} onClick={onNext}>{submitting?'กำลังจอง...':'ไปชำระเงิน'} {!submitting&&<ChevronRight/>}</button></div>
   </section>;
 }
 
-function PaymentView({ amount, slip, checking, onSlip, onVerify }: { amount:number; slip:string; checking:boolean; onSlip:(e:ChangeEvent<HTMLInputElement>)=>void; onVerify:()=>void }) {
-  const copy = () => navigator.clipboard?.writeText('1234567890');
-  return <section className="flow payment with-action"><div className="payment-timer"><Clock3/><span>กรุณาชำระภายใน</span><strong>14:32</strong></div><div className="flow-intro centered"><p className="eyebrow">BANK TRANSFER</p><h2>โอนเงินมัดจำ</h2><p>ระบบจะตรวจสอบยอดและข้อมูลในสลิปให้อัตโนมัติ</p></div>
+function PaymentView({ amount, slip, checking, config, error, onSlip, onVerify }: { amount:number; slip:string; checking:boolean; config:PublicConfig; error:string; onSlip:(e:ChangeEvent<HTMLInputElement>)=>void; onVerify:()=>void }) {
+  const copy = () => navigator.clipboard?.writeText(config.accountNumber);
+  return <section className="flow payment with-action">{!config.configured&&<div className="demo-banner"><CircleHelp/>หน้าทดลอง ห้ามโอนเงินจริงจนกว่าจะใส่บัญชีร้าน</div>}<div className="payment-timer"><Clock3/><span>กรุณาชำระภายใน</span><strong>14:32</strong></div><div className="flow-intro centered"><p className="eyebrow">BANK TRANSFER</p><h2>โอนเงินมัดจำ</h2><p>ระบบจะตรวจสอบยอดและข้อมูลในสลิปให้อัตโนมัติ</p></div>
     <div className="amount-box"><small>ยอดที่ต้องชำระ</small><strong>฿{amount.toLocaleString()}.00</strong><span>กรุณาโอนยอดตรงตามที่ระบุ</span></div>
-    <div className="bank-card"><div className="bank-logo">K</div><div><small>ธนาคารกสิกรไทย</small><strong>123-4-56789-0</strong><p>บริษัท ทริมลี่ บาร์เบอร์ จำกัด</p></div><button onClick={copy} aria-label="คัดลอกเลขบัญชี"><Copy/></button></div>
+    {config.paymentQrUrl&&<div className="payment-qr"><Image src={config.paymentQrUrl} alt="QR Code สำหรับชำระเงินเข้าบัญชีร้าน" width={180} height={180} unoptimized/><small>สแกนเพื่อชำระเงิน</small></div>}
+    <div className="bank-card"><div className="bank-logo"><Banknote/></div><div><small>{config.bankName}</small><strong>{config.accountNumber}</strong><p>{config.accountName}</p></div><button onClick={copy} aria-label="คัดลอกเลขบัญชี"><Copy/></button></div>
     <label className={`upload-box ${slip?'has-file':''}`}><input type="file" accept="image/*" onChange={onSlip}/>{slip?<><BadgeCheck/><strong>แนบสลิปแล้ว</strong><span>{slip}</span><small>แตะเพื่อเปลี่ยนรูป</small></>:<><Upload/><strong>อัปโหลดสลิป</strong><span>รองรับ JPG, PNG ขนาดไม่เกิน 10 MB</span><small>เลือกรูปจากเครื่อง</small></>}</label>
     <ul className="verify-list"><li><Check/> ตรวจชื่อบัญชีผู้รับและยอดเงิน</li><li><Check/> ตรวจวัน เวลา และเลขอ้างอิงไม่ให้ใช้ซ้ำ</li></ul>
+    {error&&<p className="error-message">{error}</p>}
     <div className="sticky-action single"><button disabled={!slip||checking} onClick={onVerify}>{checking?'กำลังตรวจสอบสลิป...':'ยืนยันและตรวจสอบสลิป'} {!checking&&<ShieldCheck/>}</button></div>
   </section>;
 }
@@ -193,8 +223,14 @@ function SuccessView({ service, barber, date, time, onAppointments }: { service:
   return <section className="success"><div className="success-mark"><Check/></div><p className="eyebrow">PAYMENT VERIFIED</p><h1>จองคิวสำเร็จ!</h1><p>สลิปผ่านการตรวจสอบแล้ว<br/>เราส่งรายละเอียดเข้าแชต LINE ให้คุณเรียบร้อย</p><div className="ticket"><div className="ticket-top"><span>TRIMLY</span><strong>#TM260909-013</strong></div><div className="ticket-time"><small>{date}</small><strong>{time}</strong><span>น.</span></div><dl><div><dt>บริการ</dt><dd>{service.name}</dd></div><div><dt>ช่าง</dt><dd>{barber.name}</dd></div><div><dt>สถานะ</dt><dd className="confirmed"><span/>ยืนยันแล้ว</dd></div></dl></div><button className="primary-wide" onClick={onAppointments}>ดูคิวของฉัน <TicketCheck/></button><button className="ghost-wide">เพิ่มลงปฏิทิน <CalendarDays/></button></section>;
 }
 
-function AppointmentsView({ onBook }: { onBook:()=>void }) {
-  return <section className="page-content"><div className="page-title"><p className="eyebrow">MY APPOINTMENTS</p><h2>คิวของฉัน</h2></div><div className="status-tabs"><button className="active">กำลังจะถึง</button><button>ประวัติ</button></div><article className="appointment-card"><div className="appointment-status"><span/> ยืนยันแล้ว <small>#TM260909-013</small></div><div className="appointment-main"><div className="calendar-leaf"><span>ก.ย.</span><strong>09</strong></div><div><h3>ตัดผมชาย</h3><p><Clock3/> 13:30–14:30 น.</p><p><UserRound/> ช่างนนท์</p></div></div><div className="appointment-actions"><button><MapPin/> แผนที่</button><button><MessageCircle/> ติดต่อร้าน</button><button className="more">···</button></div><p className="arrival"><Sparkles/> กรุณามาถึงก่อนเวลานัด 10 นาที</p></article><button className="primary-wide" onClick={onBook}>จองคิวเพิ่ม <Scissors/></button></section>;
+function AppointmentsView({ onBook, token, live }: { onBook:()=>void; token:string; live:boolean }) {
+  const [records,setRecords]=useState<Array<Record<string,unknown>>>([]);
+  const [loaded,setLoaded]=useState(!live);
+  useEffect(()=>{ if(!live||!token)return; void (async()=>{ try { const response=await fetch('/api/bookings',{headers:{authorization:`Bearer ${token}`}}); const value=await response.json() as {bookings?:Array<Record<string,unknown>>}; setRecords(value.bookings??[]); } finally { setLoaded(true); } })(); },[live,token]);
+  const record=records[0];
+  const date=record?String(record.appointment_date):'2026-09-09'; const parts=date.split('-');
+  const serviceName=record?String(record.service_name):'ตัดผมชาย'; const barberName=record?String(record.barber_name):'ช่างนนท์'; const appointmentTime=record?String(record.appointment_time):'13:30'; const status=record?String(record.status):'confirmed';
+  return <section className="page-content"><div className="page-title"><p className="eyebrow">MY APPOINTMENTS</p><h2>คิวของฉัน</h2></div><div className="status-tabs"><button className="active">กำลังจะถึง</button><button>ประวัติ</button></div>{!loaded?<div className="loading-card">กำลังโหลดคิว...</div>:live&&records.length===0?<div className="loading-card">ยังไม่มีคิวที่จองไว้</div>:<article className="appointment-card"><div className="appointment-status"><span/> {status==='confirmed'?'ยืนยันแล้ว':'รอตรวจสอบการชำระเงิน'} <small>#{record?String(record.id):'TM260909-013'}</small></div><div className="appointment-main"><div className="calendar-leaf"><span>นัดหมาย</span><strong>{parts[2]}</strong></div><div><h3>{serviceName}</h3><p><Clock3/> {appointmentTime} น.</p><p><UserRound/> {barberName}</p></div></div><div className="appointment-actions"><button><MapPin/> แผนที่</button><button><MessageCircle/> ติดต่อร้าน</button><button className="more">···</button></div><p className="arrival"><Sparkles/> กรุณามาถึงก่อนเวลานัด 10 นาที</p></article>}<button className="primary-wide" onClick={onBook}>จองคิวเพิ่ม <Scissors/></button></section>;
 }
 
 function ProfileView() {

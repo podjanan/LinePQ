@@ -8,6 +8,13 @@
       "when": 1788887654872,
       "tag": "0000_same_doctor_doom",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788889030849,
+      "tag": "0001_nice_the_hunter",
+      "breakpoints": true
     }
   ]
 }

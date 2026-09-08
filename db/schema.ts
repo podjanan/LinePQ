@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const services = sqliteTable('services', {
@@ -27,7 +28,7 @@ export const bookings = sqliteTable('bookings', {
   status: text('status').notNull().default('awaiting_payment'),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
 }, (table) => [
-  uniqueIndex('idx_bookings_barber_slot').on(table.barberId, table.appointmentDate, table.appointmentTime),
+  uniqueIndex('idx_bookings_barber_slot').on(table.barberId, table.appointmentDate, table.appointmentTime).where(sql`${table.status} IN ('awaiting_payment','confirmed')`),
 ]);
 
 export const payments = sqliteTable('payments', {

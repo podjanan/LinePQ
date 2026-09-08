@@ -1,0 +1,2 @@
+DROP INDEX `idx_bookings_barber_slot`;--> statement-breakpoint
+CREATE UNIQUE INDEX `idx_bookings_barber_slot` ON `bookings` (`barber_id`,`appointment_date`,`appointment_time`) WHERE "bookings"."status" IN ('awaiting_payment','confirmed');
