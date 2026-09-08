@@ -44,6 +44,8 @@ const dates = [
 const times = ['10:00', '10:30', '11:30', '12:30', '13:30', '14:00', '15:30', '16:00', '17:30', '18:00'];
 
 export default function HomePage() {
+  const [liveBarbers, setLiveBarbers] = useState<typeof barbers>([]);
+  const [barberError, setBarberError] = useState('');
   const [screen, setScreen] = useState<Screen>('home');
   const [serviceId, setServiceId] = useState('cut');
   const [barberId, setBarberId] = useState('non');
@@ -61,7 +63,7 @@ export default function HomePage() {
   const [config, setConfig] = useState<PublicConfig>({ liffId:'', bankName:'ธนาคารของร้าน', accountName:'ชื่อบัญชีร้าน', accountNumber:'กรุณาตั้งค่าเลขบัญชี', paymentQrUrl:'', configured:false });
 
   const service = services.find((item) => item.id === serviceId) ?? services[0];
-  const barber = barbers.find((item) => item.id === barberId) ?? barbers[0];
+  const barber = liveBarbers.find((item) => item.id === barberId) ?? barbers[0];
   const deposit = Math.min(300, service.price);
 
   const startBooking = () => setScreen('services');
@@ -87,6 +89,18 @@ export default function HomePage() {
     if (!config.configured || !lineIdToken) { setBookingId(`DEMO-${Date.now()}`); setScreen('payment'); setSubmitting(false); return; }
     try { const date=new Date(); date.setDate(date.getDate()+dateIndex); const localDate=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`; const response=await fetch('/api/bookings',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${lineIdToken}`},body:JSON.stringify({serviceId,barberId,date:localDate,time,customerName,phone})}); const result=await response.json() as {id?:string;error?:string}; if(!response.ok||!result.id) throw new Error(result.error||'สร้างการจองไม่สำเร็จ'); setBookingId(result.id); setScreen('payment'); } catch(error) { setErrorMessage(error instanceof Error?error.message:'สร้างการจองไม่สำเร็จ'); } finally { setSubmitting(false); }
   };
+
+  useEffect(() => {
+    if (screen !== 'barber') return;
+    let active = true;
+    setLiveBarbers([]); setBarberError('');
+    fetch('/api/barbers', { cache: 'no-store' }).then(async response => {
+      if (!response.ok) throw new Error('โหลดรายชื่อช่างไม่สำเร็จ กรุณาย้อนกลับแล้วลองใหม่');
+      const result = await response.json();
+      if (active) { setLiveBarbers(result.barbers); if (!result.barbers.length) setBarberError('ยังไม่มีช่างเปิดรับคิว กรุณาติดต่อร้าน'); }
+    }).catch(e => { if (active) setBarberError(e.message); });
+    return () => { active = false; };
+  }, [screen]);
 
   useEffect(() => {
     let active=true;
@@ -129,7 +143,7 @@ export default function HomePage() {
   const content = (() => {
     if (screen === 'home') return <HomeView onBook={startBooking} onAppointments={() => navTo('appointments')} live={config.configured} />;
     if (screen === 'services') return <ServicesView selected={serviceId} onSelect={chooseService} />;
-    if (screen === 'barber') return <BarberView selected={barberId} onSelect={chooseBarber} />;
+    if (screen === 'barber') return <>{barberError && <p role="alert" className="error-message">{barberError}</p>}<BarberView barbers={liveBarbers} selected={barberId} onSelect={chooseBarber} /></>;
     if (screen === 'schedule') return <ScheduleView barber={barber} dateIndex={dateIndex} time={time} onDate={setDateIndex} onTime={setTime} onNext={() => setScreen('checkout')} />;
     if (screen === 'checkout') return <CheckoutView service={service} barber={barber} date={dates[dateIndex].full} time={time} deposit={deposit} customerName={customerName} phone={phone} submitting={submitting} error={errorMessage} onName={setCustomerName} onPhone={setPhone} onNext={createBooking} />;
     if (screen === 'payment') return <PaymentView amount={deposit} slip={slip} checking={checking} config={config} error={errorMessage} onSlip={onSlip} onVerify={verifySlip} />;
@@ -165,7 +179,7 @@ function HomeView({ onBook, onAppointments, live }: { onBook: () => void; onAppo
     {!live&&<div className="demo-banner"><CircleHelp/>โหมดทดลอง — ใส่ค่า LINE, บัญชี และ SlipOK ก่อนเปิดรับคิวจริง</div>}
     <section className="hero-card">
       <Image src="/barbershop-hero.png" alt="บรรยากาศร้านตัดผม TRIMLY" fill priority sizes="(max-width: 640px) 100vw, 520px" />
-      <div className="hero-shade"/><div className="hero-copy"><span><span className="open-dot"/>เปิดวันนี้ถึง 20:00</span><h2>ทรงใหม่<br/>เริ่มตรงนี้</h2><button onClick={onBook}>จองคิวตอนนี้ <ChevronRight size={18}/></button></div>
+      <div className="hero-shade"/><div className="hero-copy"><span className="hero-status"><span className="open-dot"/>เปิดวันนี้ · รับคิวถึง 20:00</span><h2>เลือกช่างที่ใช่<br/>ในเวลาของคุณ</h2><button onClick={onBook}>จองคิวตอนนี้ <ChevronRight size={18}/></button></div>
     </section>
     <section className="quick-grid" aria-label="เมนูลัด">
       <button onClick={onBook}><Scissors/><span>จองคิว</span><small>เลือกช่างและเวลา</small></button>
@@ -183,7 +197,7 @@ function ServicesView({ selected, onSelect }: { selected: string; onSelect: (id:
   return <section className="flow"><Step current={1}/><div className="flow-intro"><p className="eyebrow">STEP 01</p><h2>วันนี้อยากทำอะไรครับ?</h2><p>เลือกบริการก่อน แล้วเราจะแสดงช่างและเวลาที่ว่างให้</p></div><div className="choice-list">{services.map((item,index) => <button className={`choice-card ${selected===item.id?'selected':''}`} onClick={() => onSelect(item.id)} key={item.id}><div className="number">0{index+1}</div><div><span className="tag">{item.tag}</span><h3>{item.name}</h3><p>{item.detail}</p><small><Clock3 size={14}/> {item.duration} นาที</small></div><div className="choice-end"><strong>฿{item.price.toLocaleString()}</strong><ChevronRight/></div></button>)}</div></section>;
 }
 
-function BarberView({ selected, onSelect }: { selected: string; onSelect: (id: string) => void }) {
+function BarberView({ barbers, selected, onSelect }: { barbers: {id:string;name:string;role:string;skill:string;initial:string;tone:string;next:string}[]; selected: string; onSelect: (id: string) => void }) {
   return <section className="flow"><Step current={2}/><div className="flow-intro"><p className="eyebrow">STEP 02</p><h2>เลือกช่างที่ใช่</h2><p>ดูความถนัดและคิวว่างล่าสุดของช่างแต่ละคน</p></div><div className="barber-list">{barbers.map((item) => <button className={`barber-card ${selected===item.id?'selected':''}`} onClick={() => onSelect(item.id)} key={item.id}><div className={`barber-avatar ${item.tone}`}>{item.initial}</div><div><div className="online"><span/>{item.next==='12:30'?'เร็วที่สุด':'ว่าง '+item.next+' น.'}</div><h3>{item.name}</h3><p>{item.role}</p><small>{item.skill}</small></div><ChevronRight className="barber-arrow"/></button>)}</div></section>;
 }
 
